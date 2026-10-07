@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +9,7 @@ import (
 	"time"
 
 	"github.com/1260124186-cc/solo-0016-cellar-run-control/internal/domain"
+	"github.com/1260124186-cc/solo-0016-cellar-run-control/internal/migrate"
 )
 
 const stateFileName = "state.json"
@@ -21,9 +21,15 @@ type Store struct {
 	now      func() time.Time
 }
 
+// Open brings the data directory to the current schema version and then
+// loads it. Unknown, future, or corrupt data is refused before any serving
+// path can observe it.
 func Open(dataDir string) (*Store, error) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create data directory: %w", err)
+	}
+	if _, err := migrate.EnsureCurrent(dataDir); err != nil {
+		return nil, fmt.Errorf("upgrade data directory: %w", err)
 	}
 	store := &Store{
 		path:     filepath.Join(dataDir, stateFileName),
@@ -37,18 +43,14 @@ func Open(dataDir string) (*Store, error) {
 }
 
 func (s *Store) load() error {
-	raw, err := os.ReadFile(s.path)
+	snapshot, _, err := migrate.ReadState(s.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("read state: %w", err)
+		return err
 	}
-	var loaded domain.Snapshot
-	if err := json.Unmarshal(raw, &loaded); err != nil {
-		return fmt.Errorf("decode state: %w", err)
-	}
-	normalized, err := normalizeSnapshot(loaded)
+	normalized, err := normalizeSnapshot(snapshot)
 	if err != nil {
 		return err
 	}
@@ -78,60 +80,10 @@ func normalizeSnapshot(value domain.Snapshot) (domain.Snapshot, error) {
 	if value.RunIndex == nil {
 		value.RunIndex = map[string]string{}
 	}
-	if err := validateIndexes(value); err != nil {
+	if err := value.ValidateConsistency(); err != nil {
 		return domain.Snapshot{}, err
 	}
 	return value, nil
-}
-
-func validateIndexes(value domain.Snapshot) error {
-	expectedNames := make(map[string]string, len(value.Formulas))
-	for id, formula := range value.Formulas {
-		key := domain.NameKey(formula.Name)
-		if key == "" {
-			return fmt.Errorf("formula %s has an empty normalized name", id)
-		}
-		if existing, found := expectedNames[key]; found && existing != id {
-			return fmt.Errorf("formula name index contains a duplicate key")
-		}
-		expectedNames[key] = id
-	}
-	if err := compareIndexes("formula name", value.NameIndex, expectedNames); err != nil {
-		return err
-	}
-
-	expectedVessels := make(map[string]string, len(value.Vessels))
-	for id, vessel := range value.Vessels {
-		if existing, found := expectedVessels[vessel.Code]; found && existing != id {
-			return fmt.Errorf("vessel index contains a duplicate code")
-		}
-		expectedVessels[vessel.Code] = id
-	}
-	if err := compareIndexes("vessel code", value.VesselIndex, expectedVessels); err != nil {
-		return err
-	}
-
-	expectedRuns := make(map[string]string, len(value.Runs))
-	for id, run := range value.Runs {
-		if existing, found := expectedRuns[run.Code]; found && existing != id {
-			return fmt.Errorf("run index contains a duplicate code")
-		}
-		expectedRuns[run.Code] = id
-	}
-	return compareIndexes("run code", value.RunIndex, expectedRuns)
-}
-
-func compareIndexes(label string, actual, expected map[string]string) error {
-	if len(actual) != len(expected) {
-		return fmt.Errorf("%s index does not match its collection", label)
-	}
-	for key, expectedID := range expected {
-		actualID, found := actual[key]
-		if !found || actualID != expectedID {
-			return fmt.Errorf("%s index does not match its collection", label)
-		}
-	}
-	return nil
 }
 
 func (s *Store) Revision() int64 {
@@ -161,7 +113,7 @@ func (s *Store) Update(expected *int64, mutate func(*domain.Snapshot) error) err
 	}
 	candidate.Revision = s.snapshot.Revision + 1
 	candidate.UpdatedAt = s.now()
-	if err := writeSnapshot(s.path, candidate); err != nil {
+	if err := migrate.WriteState(s.path, candidate); err != nil {
 		return domain.NewError(domain.CodeStorage, err.Error())
 	}
 	s.snapshot = candidate

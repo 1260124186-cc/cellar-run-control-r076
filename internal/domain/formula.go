@@ -14,11 +14,19 @@ const (
 	FormulaRetired  FormulaState = "retired"
 )
 
+// IngredientRef pins one ingredient to an approved revision of the cellar
+// ingredient catalog. A step can reference several ingredients.
+type IngredientRef struct {
+	IngredientID string `json:"ingredient_id"`
+	Version      int    `json:"version"`
+}
+
 type FormulaStep struct {
-	Sequence     int     `json:"sequence"`
-	Label        string  `json:"label"`
-	TemperatureC float64 `json:"temperature_c"`
-	HoldMinutes  int     `json:"hold_minutes"`
+	Sequence     int             `json:"sequence"`
+	Label        string          `json:"label"`
+	TemperatureC float64         `json:"temperature_c"`
+	HoldMinutes  int             `json:"hold_minutes"`
+	Ingredients  []IngredientRef `json:"ingredients"`
 }
 
 type Formula struct {
@@ -41,8 +49,23 @@ type Formula struct {
 
 func (f Formula) Clone() Formula {
 	cloned := f
-	cloned.Steps = append([]FormulaStep(nil), f.Steps...)
+	cloned.Steps = cloneSteps(f.Steps)
 	return cloned
+}
+
+// cloneSteps deep-copies a step list so ingredient slices are never shared
+// between aggregates. Ingredient lists are normalized to non-nil so the
+// in-memory form matches the versioned persisted schema.
+func cloneSteps(steps []FormulaStep) []FormulaStep {
+	if steps == nil {
+		return nil
+	}
+	copied := make([]FormulaStep, len(steps))
+	for index, step := range steps {
+		copied[index] = step
+		copied[index].Ingredients = append([]IngredientRef{}, step.Ingredients...)
+	}
+	return copied
 }
 
 func (f *Formula) Normalize() {
@@ -126,6 +149,31 @@ func ValidateFormulaSteps(steps []FormulaStep, required bool) error {
 			return FieldError(CodeInvalidInput, "steps.hold_minutes",
 				"must be between 1 and 1440")
 		}
+		if err := validateIngredientRefs(step.Ingredients); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateIngredientRefs(ingredients []IngredientRef) error {
+	if len(ingredients) > 16 {
+		return FieldError(CodeInvalidInput, "steps.ingredients",
+			"must contain at most 16 entries")
+	}
+	for _, ingredient := range ingredients {
+		if strings.TrimSpace(ingredient.IngredientID) == "" {
+			return FieldError(CodeInvalidInput, "steps.ingredients.ingredient_id",
+				"is required")
+		}
+		if len([]rune(ingredient.IngredientID)) > 80 {
+			return FieldError(CodeInvalidInput, "steps.ingredients.ingredient_id",
+				"must not exceed 80 characters")
+		}
+		if ingredient.Version < 1 {
+			return FieldError(CodeInvalidInput, "steps.ingredients.version",
+				"must be at least 1")
+		}
 	}
 	return nil
 }
@@ -137,7 +185,13 @@ func (f *Formula) SetSteps(steps []FormulaStep) error {
 	if err := ValidateFormulaSteps(steps, false); err != nil {
 		return err
 	}
-	f.Steps = append([]FormulaStep(nil), steps...)
+	copied := cloneSteps(steps)
+	for index := range copied {
+		if copied[index].Ingredients == nil {
+			copied[index].Ingredients = []IngredientRef{}
+		}
+	}
+	f.Steps = copied
 	f.UpdatedAt = time.Now().UTC()
 	f.Version++
 	return nil

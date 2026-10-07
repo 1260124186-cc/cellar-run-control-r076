@@ -27,7 +27,9 @@ deferred to a later engineering task.
 A formula contains an identifier, normalized name, style label, target original
 gravity, target final gravity, maximum fermentation temperature, minimum and
 maximum planned days, ordered process steps, lifecycle state, version, and
-timestamps.
+timestamps. Each process step carries an explicit list of ingredient
+references; every reference pins an ingredient identifier to an approved
+catalog version.
 
 States are `draft`, `approved`, and `retired`.
 
@@ -41,6 +43,8 @@ States are `draft`, `approved`, and `retired`.
 - Step sequence values must be contiguous and start at 1.
 - Step temperatures are in the inclusive range 5 to 90 Celsius.
 - Step hold times are 1 to 1440 minutes.
+- A step references at most 16 ingredients; each reference requires an
+  ingredient identifier and a catalog version of at least 1.
 - `draft -> approved` requires a complete valid step list.
 - An approved formula is immutable.
 - `approved -> retired` is allowed only when no run currently uses it.
@@ -152,13 +156,16 @@ domain rules, and snapshot storage.
 
 ## Modules
 
-- `cmd/fermentctl`: executable entry point for the HTTP service and bounded
-  workflow checks.
+- `cmd/fermentctl`: executable entry point for the HTTP service, schema
+  migration commands, and bounded workflow checks.
 - `internal/config`: environment and command-line configuration.
 - `internal/clock`: deterministic clock boundary for production and checks.
 - `internal/domain`: entities, validation, state transitions, and metrics.
 - `internal/service`: use-case orchestration and revision coordination.
-- `internal/storage`: snapshot repository, atomic replacement, and locking.
+- `internal/migrate`: versioned state schema, checksummed envelopes, the
+  approved migration registry, and the crash-safe migration journal.
+- `internal/storage`: snapshot repository and locking; persists through the
+  versioned envelope format.
 - `internal/httpapi`: routing, strict JSON decoding, error mapping, and health.
 - `internal/workflowcheck`: real HTTP workflow checks used by the executable.
 
@@ -166,9 +173,7 @@ The dependency direction is:
 
 `cmd -> workflowcheck/httpapi -> service -> domain`
 
-`service -> storage`
-
-`storage -> domain`
+`service -> storage -> migrate -> domain`
 
 The domain package does not import outer packages.
 
@@ -202,6 +207,33 @@ Reads use copied values and never expose repository-owned maps or slices. The
 default address is `127.0.0.1:8088`, the request body limit is 1 MiB, and all
 workflow checks use temporary directories.
 
+## Schema Versions And Migration
+
+The state file is versioned. Version 1 is the legacy bare snapshot written
+before envelopes existed. Version 2 and later store an envelope with the
+producer identifier, the schema version, a SHA-256 checksum over the snapshot
+payload, and the snapshot itself; version 2 introduces per-step ingredient
+references on formulas.
+
+At startup the service detects the stored version and runs the approved
+migration chain in order before HTTP serving begins. Each migration step
+transforms the snapshot, verifies the result (domain validation, migration
+invariants, and index consistency), records the verified checksum in a
+durable journal, and only then advances. The live state file is replaced
+exactly once, atomically, after every step is verified, so formula and run
+reads never observe partially migrated data. The pre-migration state is
+preserved under `backups/`.
+
+Startup refuses data of unknown origin, data from a future schema version,
+and envelopes whose checksum does not verify; the process exits before
+serving. A migration interrupted by power loss leaves the journal and the
+original state file behind: the next start resumes from the last verified
+step, and `fermentctl migrate rollback` returns the directory to its
+pre-migration state. `fermentctl migrate status` reports the stored version,
+pending steps, and any interrupted migration; `fermentctl migrate run`
+performs the same upgrade as startup inside a maintenance window without
+opening the HTTP port.
+
 ## Validation Plan
 
 The baseline declares `testing: deferred` and intentionally contains no unit
@@ -210,13 +242,15 @@ task owns systematic tests for validation boundaries, state transitions,
 numeric calculations, stale revisions, storage failures, and concurrent
 reservation attempts.
 
-The current build command is `go build ./...`. Three bounded production checks
-start the real HTTP handler, issue real JSON requests, check success and failure
-behavior, and exit without external services:
+The current build command is `go build ./...`. Four bounded production checks
+start the real HTTP handler or the real migration machinery, issue real
+requests and file operations, check success and failure behavior, and exit
+without external services:
 
 - `go run ./cmd/fermentctl check formula-approval`
 - `go run ./cmd/fermentctl check vessel-run-lifecycle`
 - `go run ./cmd/fermentctl check observations-completion`
+- `go run ./cmd/fermentctl check migration-upgrade`
 
 ## Scope Limits
 

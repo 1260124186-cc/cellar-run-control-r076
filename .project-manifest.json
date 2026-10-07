@@ -6,7 +6,7 @@
     {
       "id": "cmd",
       "path": "cmd/fermentctl",
-      "responsibility": "start the service and run bounded workflow checks"
+      "responsibility": "start the service, run schema migrations, and run bounded workflow checks"
     },
     {
       "id": "config",
@@ -32,6 +32,11 @@
       "id": "storage",
       "path": "internal/storage",
       "responsibility": "persist and load revisioned JSON snapshots atomically"
+    },
+    {
+      "id": "migrate",
+      "path": "internal/migrate",
+      "responsibility": "version the state schema, verify checksummed envelopes, and run crash-safe approved migrations"
     },
     {
       "id": "httpapi",
@@ -112,6 +117,27 @@
         "service",
         "domain",
         "storage"
+      ]
+    },
+    {
+      "id": "migration-upgrade",
+      "name": "Upgrade a legacy snapshot, resume interrupted migrations, and refuse untrusted data",
+      "entry": "fermentctl migrate status|run|rollback",
+      "steps": [
+        "detect the legacy schema version and run the approved migration chain",
+        "verify each step and record its checksum in the durable journal",
+        "publish the migrated snapshot with one atomic replacement",
+        "resume or roll back interrupted migrations without touching original data"
+      ],
+      "success": "serves the migrated formulas and runs at the preserved revision",
+      "failure": "refuses unknown-origin, future-version, or checksum-mismatched data before serving",
+      "verification": "the check migrates real state files, stages every crash window, and drives the public HTTP API",
+      "module_ids": [
+        "migrate",
+        "storage",
+        "service",
+        "domain",
+        "httpapi"
       ]
     }
   ]

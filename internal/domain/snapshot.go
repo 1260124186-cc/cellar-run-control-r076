@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 type Snapshot struct {
 	Revision    int64                      `json:"revision"`
@@ -64,4 +67,57 @@ func withActiveRun(v Vessel, runID *string) Vessel {
 	copied := *runID
 	value.ActiveRunID = &copied
 	return value
+}
+
+// ValidateConsistency checks that the lookup indexes exactly match their
+// entity collections. It is used both when a snapshot is loaded for serving
+// and when a migration verifies its result before cutover.
+func (s Snapshot) ValidateConsistency() error {
+	expectedNames := make(map[string]string, len(s.Formulas))
+	for id, formula := range s.Formulas {
+		key := NameKey(formula.Name)
+		if key == "" {
+			return fmt.Errorf("formula %s has an empty normalized name", id)
+		}
+		if existing, found := expectedNames[key]; found && existing != id {
+			return fmt.Errorf("formula name index contains a duplicate key")
+		}
+		expectedNames[key] = id
+	}
+	if err := compareIndex("formula name", s.NameIndex, expectedNames); err != nil {
+		return err
+	}
+
+	expectedVessels := make(map[string]string, len(s.Vessels))
+	for id, vessel := range s.Vessels {
+		if existing, found := expectedVessels[vessel.Code]; found && existing != id {
+			return fmt.Errorf("vessel index contains a duplicate code")
+		}
+		expectedVessels[vessel.Code] = id
+	}
+	if err := compareIndex("vessel code", s.VesselIndex, expectedVessels); err != nil {
+		return err
+	}
+
+	expectedRuns := make(map[string]string, len(s.Runs))
+	for id, run := range s.Runs {
+		if existing, found := expectedRuns[run.Code]; found && existing != id {
+			return fmt.Errorf("run index contains a duplicate code")
+		}
+		expectedRuns[run.Code] = id
+	}
+	return compareIndex("run code", s.RunIndex, expectedRuns)
+}
+
+func compareIndex(label string, actual, expected map[string]string) error {
+	if len(actual) != len(expected) {
+		return fmt.Errorf("%s index does not match its collection", label)
+	}
+	for key, expectedID := range expected {
+		actualID, found := actual[key]
+		if !found || actualID != expectedID {
+			return fmt.Errorf("%s index does not match its collection", label)
+		}
+	}
+	return nil
 }

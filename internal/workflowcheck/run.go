@@ -12,6 +12,14 @@ import (
 )
 
 func Run(name string) error {
+	if name == "migration-upgrade" {
+		if err := migrationUpgrade(); err != nil {
+			return err
+		}
+		fmt.Printf("workflow check passed: %s\n", name)
+		return nil
+	}
+
 	dataDir, err := os.MkdirTemp("", "cellar-run-check-*")
 	if err != nil {
 		return fmt.Errorf("create check directory: %w", err)

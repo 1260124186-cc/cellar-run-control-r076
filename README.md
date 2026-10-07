@@ -49,11 +49,12 @@ go run ./cmd/fermentctl serve
 ## Directory Structure
 
 ```text
-cmd/fermentctl                 service and workflow-check executable
+cmd/fermentctl                 service, migration, and workflow-check executable
 internal/clock                 time boundary
 internal/config                environment configuration
 internal/domain                entities, validation, transitions, metrics
 internal/httpapi               HTTP routes, JSON decoding, errors
+internal/migrate               versioned schema, envelopes, migration journal
 internal/service               use-case orchestration
 internal/storage               revisioned snapshot persistence
 internal/workflowcheck         real HTTP production checks
@@ -107,6 +108,39 @@ shape:
 }
 ```
 
+## Schema Migrations
+
+The state file is versioned. The current binary writes schema version 2: a
+checksummed envelope whose snapshot carries per-step ingredient references on
+formulas. Snapshots written by the previous controller (bare JSON without a
+version marker) are schema version 1.
+
+Startup detects the stored version and runs approved migrations in order
+before the HTTP port opens, so the upgrade happens inside the downtime
+window. Each step verifies its result and records it in a durable journal;
+the live state file is replaced atomically only after every step verifies,
+and the pre-migration state is kept under `backups/`. Startup refuses data
+of unknown origin, data from a future schema version, and data whose
+checksum does not verify.
+
+Operator commands (they use the same `CELLAR_CONTROL_DATA_DIR`):
+
+```bash
+# inspect stored version, pending migrations, interrupted migrations
+go run ./cmd/fermentctl migrate status
+
+# perform pending migrations now, printing each verified step
+go run ./cmd/fermentctl migrate run
+
+# abandon an interrupted migration and restore pre-migration data
+go run ./cmd/fermentctl migrate rollback
+```
+
+If power is lost mid-migration, the next start resumes from the last
+verified step; `migrate rollback` instead returns the directory to the
+original, still-usable data. Formula and run reads never observe partially
+migrated state.
+
 ## Workflow Checks
 
 Run each production workflow check separately:
@@ -115,23 +149,31 @@ Run each production workflow check separately:
 go run ./cmd/fermentctl check formula-approval
 go run ./cmd/fermentctl check vessel-run-lifecycle
 go run ./cmd/fermentctl check observations-completion
+go run ./cmd/fermentctl check migration-upgrade
 ```
 
 Each check creates a temporary snapshot directory, starts the real HTTP
 handler on a loopback listener, issues JSON requests, verifies success and
-failure behavior, and removes its temporary data.
+failure behavior, and removes its temporary data. The migration check
+additionally upgrades a legacy snapshot on disk, interrupts and resumes
+migrations at every crash window, rolls interrupted migrations back, and
+verifies that unknown, future, or tampered data is refused.
 
 ## Persistence And Recovery
 
 The service stores a complete revisioned snapshot at
-`<data-directory>/state.json`. A write creates a temporary file in the same
-directory, commits the encoded bytes durably, closes the handle, and renames
-the result over the previous snapshot. The in-memory snapshot is replaced only
-after that operation succeeds.
+`<data-directory>/state.json` inside a versioned, checksummed envelope. A
+write creates a temporary file in the same directory, commits the encoded
+bytes durably, closes the handle, and renames the result over the previous
+snapshot. The in-memory snapshot is replaced only after that operation
+succeeds.
 
 On startup, an existing snapshot is decoded and normalized. Unknown or
-conflicting map indexes are not silently invented; invalid JSON or a negative
-revision stops the process before HTTP serving begins.
+conflicting map indexes are not silently invented; invalid JSON, a negative
+revision, an unrecognized producer, a future schema version, or a checksum
+mismatch stops the process before HTTP serving begins. See
+[Schema Migrations](#schema-migrations) for the upgrade and rollback
+protocol.
 
 ## Repair-Ready Boundaries
 
