@@ -26,8 +26,8 @@ deferred to a later engineering task.
 
 A formula contains an identifier, normalized name, style label, target original
 gravity, target final gravity, maximum fermentation temperature, minimum and
-maximum planned days, ordered process steps, lifecycle state, version, and
-timestamps.
+maximum planned days, an ordered ingredient list, ordered process steps,
+lifecycle state, version, and timestamps.
 
 States are `draft`, `approved`, and `retired`.
 
@@ -37,10 +37,13 @@ States are `draft`, `approved`, and `retired`.
   differs from it by at least 0.005.
 - Maximum fermentation temperature is in the inclusive range 5 to 40 Celsius.
 - Planned duration is 1 to 120 days and the minimum cannot exceed the maximum.
-- A formula has 1 to 24 process steps.
-- Step sequence values must be contiguous and start at 1.
+- A formula has 0 to 24 ingredients and 1 to 24 process steps.
+- Ingredient and step sequence values must be contiguous and start at 1.
+- Ingredient amounts are positive and every ingredient names a unit.
 - Step temperatures are in the inclusive range 5 to 90 Celsius.
 - Step hold times are 1 to 1440 minutes.
+- A step may carry a versioned template reference (`template_ref` with a
+  positive `template_version`); the pair must appear together.
 - `draft -> approved` requires a complete valid step list.
 - An approved formula is immutable.
 - `approved -> retired` is allowed only when no run currently uses it.
@@ -105,6 +108,7 @@ Public entry points are:
 
 - `POST /v1/formulas`
 - `PUT /v1/formulas/{id}/steps`
+- `PUT /v1/formulas/{id}/ingredients`
 - `POST /v1/formulas/{id}/approve`
 - `GET /v1/formulas/{id}`
 
@@ -152,13 +156,14 @@ domain rules, and snapshot storage.
 
 ## Modules
 
-- `cmd/fermentctl`: executable entry point for the HTTP service and bounded
-  workflow checks.
+- `cmd/fermentctl`: executable entry point for the HTTP service, schema
+  migration commands, and bounded workflow checks.
 - `internal/config`: environment and command-line configuration.
 - `internal/clock`: deterministic clock boundary for production and checks.
 - `internal/domain`: entities, validation, state transitions, and metrics.
 - `internal/service`: use-case orchestration and revision coordination.
-- `internal/storage`: snapshot repository, atomic replacement, and locking.
+- `internal/storage`: versioned snapshot repository, integrity checks,
+  approved migrations, atomic replacement, and locking.
 - `internal/httpapi`: routing, strict JSON decoding, error mapping, and health.
 - `internal/workflowcheck`: real HTTP workflow checks used by the executable.
 
@@ -189,18 +194,43 @@ updated aggregate and its version. A failed write returns:
 Write requests may include `X-Expected-Version`. When present, the service
 rejects a stale write instead of overwriting newer state.
 
-`GET /healthz` returns process health and the current snapshot revision.
+`GET /healthz` returns process health, the current snapshot revision, and
+the persisted schema version.
 
 ## Persistence And Concurrency
 
 The configured data directory contains `state.json`. Writes are serialized by
 an in-process mutex. The complete state is encoded, committed to durable
-storage, and then atomically renamed over the target. An update is not
-published in memory unless persistence succeeds.
+storage, and then atomically renamed over the target; the directory is synced
+so the rename survives a power loss. An update is not published in memory
+unless persistence succeeds.
 
 Reads use copied values and never expose repository-owned maps or slices. The
 default address is `127.0.0.1:8088`, the request body limit is 1 MiB, and all
 workflow checks use temporary directories.
+
+### Schema Versions And Migration
+
+The persisted state is versioned. Version 1 is the legacy bare snapshot; the
+current version 2 wraps the snapshot in an envelope with a `format`
+provenance marker, the `schema_version`, and a SHA-256 checksum of the
+canonical snapshot encoding, and moves formulas to the
+ingredient-plus-version-reference layout.
+
+Startup identifies the data version before serving and refuses to continue
+when the file has an unknown origin, a newer schema version than the binary
+supports, or a failed checksum or structural validation. A legacy file is
+upgraded by the approved migration chain registered in the binary, executed
+in order. Every applied step is validated and recorded in
+`migration-journal.json` with pre/post checksums and record counts; the
+original state is preserved under `backups/` and replaced only by one atomic
+commit after all steps succeed, so partially migrated data is never served.
+The completed journal is kept as `migration-report.json`.
+
+An interrupted migration is resumed from its journal on the next start, or
+rolled back to the preserved backup with `fermentctl migrate rollback`.
+`fermentctl migrate status` and `fermentctl migrate run` support executing
+and verifying the upgrade inside a downtime window.
 
 ## Validation Plan
 
@@ -210,13 +240,19 @@ task owns systematic tests for validation boundaries, state transitions,
 numeric calculations, stale revisions, storage failures, and concurrent
 reservation attempts.
 
-The current build command is `go build ./...`. Three bounded production checks
+The current build command is `go build ./...`. Four bounded production checks
 start the real HTTP handler, issue real JSON requests, check success and failure
 behavior, and exit without external services:
 
 - `go run ./cmd/fermentctl check formula-approval`
 - `go run ./cmd/fermentctl check vessel-run-lifecycle`
 - `go run ./cmd/fermentctl check observations-completion`
+- `go run ./cmd/fermentctl check migration`
+
+The migration check plants legacy, interrupted, and corrupt state files to
+verify version detection, ordered migration with checkable step results,
+refusal of unknown or future or tampered data, resume after interruption,
+and clean rollback.
 
 ## Scope Limits
 

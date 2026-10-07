@@ -17,6 +17,7 @@ func (s *Service) CreateFormula(input CreateFormulaInput) (domain.Formula, error
 		MaxFermentationTempC:  input.MaxFermentationTempC,
 		MinimumDays:           input.MinimumDays,
 		MaximumDays:           input.MaximumDays,
+		Ingredients:           []domain.FormulaIngredient{},
 		Steps:                 []domain.FormulaStep{},
 		State:                 domain.FormulaDraft,
 		Version:               1,
@@ -63,6 +64,33 @@ func (s *Service) SetFormulaSteps(
 			return err
 		}
 		if err := formula.SetSteps(input.Steps); err != nil {
+			return err
+		}
+		formula.UpdatedAt = s.clock.Now()
+		snapshot.Formulas[id] = formula
+		updated = formula.Clone()
+		return nil
+	})
+	if err != nil {
+		return domain.Formula{}, err
+	}
+	return updated, nil
+}
+
+func (s *Service) SetFormulaIngredients(
+	id string,
+	input SetFormulaIngredientsInput,
+) (domain.Formula, error) {
+	var updated domain.Formula
+	err := s.store.Execute(func(snapshot *domain.Snapshot) error {
+		formula, ok := snapshot.Formulas[id]
+		if !ok {
+			return domain.NewError(domain.CodeFormulaNotFound, "formula was not found")
+		}
+		if err := s.checkExpected(formula.Version, input.ExpectedVersion); err != nil {
+			return err
+		}
+		if err := formula.SetIngredients(input.Ingredients); err != nil {
 			return err
 		}
 		formula.UpdatedAt = s.clock.Now()

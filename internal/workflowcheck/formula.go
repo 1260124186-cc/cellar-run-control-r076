@@ -47,6 +47,21 @@ func formulaApproval(api *client) error {
 		return fmt.Errorf("formula steps were not accepted as one revision")
 	}
 
+	ingredientsResponse, err := api.call("PUT", "/v1/formulas/"+formula.ID+"/ingredients",
+		formulaIngredientPayload(), ptrInt64(2))
+	if err != nil {
+		return err
+	}
+	if err := requireStatus(ingredientsResponse, 200, "set formula ingredients"); err != nil {
+		return err
+	}
+	if err := ingredientsResponse.decode(&formula); err != nil {
+		return err
+	}
+	if formula.Version != 3 || len(formula.Ingredients) != 2 {
+		return fmt.Errorf("formula ingredients were not accepted as one revision")
+	}
+
 	duplicate, err := api.call("POST", "/v1/formulas",
 		createFormulaPayload("  current   pale  "), nil)
 	if err != nil {
@@ -57,7 +72,7 @@ func formulaApproval(api *client) error {
 		return err
 	}
 
-	approvedResponse, err := api.call("POST", "/v1/formulas/"+formula.ID+"/approve", nil, ptrInt64(2))
+	approvedResponse, err := api.call("POST", "/v1/formulas/"+formula.ID+"/approve", nil, ptrInt64(3))
 	if err != nil {
 		return err
 	}
@@ -67,7 +82,7 @@ func formulaApproval(api *client) error {
 	if err := approvedResponse.decode(&formula); err != nil {
 		return err
 	}
-	if formula.State != domain.FormulaApproved || formula.Version != 3 {
+	if formula.State != domain.FormulaApproved || formula.Version != 4 {
 		return fmt.Errorf("approved formula has unexpected state or version")
 	}
 
@@ -82,11 +97,12 @@ func formulaApproval(api *client) error {
 	if err := readResponse.decode(&readBack); err != nil {
 		return err
 	}
-	if readBack.State != domain.FormulaApproved || len(readBack.Steps) != 3 {
+	if readBack.State != domain.FormulaApproved || len(readBack.Steps) != 3 ||
+		len(readBack.Ingredients) != 2 {
 		return fmt.Errorf("approved formula was not readable")
 	}
 
-	repeated, err := api.call("POST", "/v1/formulas/"+formula.ID+"/approve", nil, ptrInt64(3))
+	repeated, err := api.call("POST", "/v1/formulas/"+formula.ID+"/approve", nil, ptrInt64(4))
 	if err != nil {
 		return err
 	}

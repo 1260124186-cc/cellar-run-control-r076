@@ -24,6 +24,11 @@ func (s *Service) Revision() int64 {
 	return s.store.Revision()
 }
 
+// SchemaVersion reports the persisted schema version this binary serves.
+func (s *Service) SchemaVersion() int {
+	return storage.CurrentSchemaVersion
+}
+
 func (s *Service) checkExpected(current int64, expected *int64) error {
 	if expected != nil && current != *expected {
 		return domain.NewError(domain.CodeRevisionConflict,

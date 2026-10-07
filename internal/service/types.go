@@ -21,6 +21,11 @@ type SetFormulaStepsInput struct {
 	Steps           []domain.FormulaStep
 }
 
+type SetFormulaIngredientsInput struct {
+	ExpectedVersion *int64
+	Ingredients     []domain.FormulaIngredient
+}
+
 type VersionInput struct {
 	ExpectedVersion *int64
 }

@@ -13,8 +13,9 @@ func NewHandler(app *service.Service) http.Handler {
 	registerRunRoutes(mux, app)
 	mux.HandleFunc("GET /healthz", func(response http.ResponseWriter, _ *http.Request) {
 		writeJSON(response, http.StatusOK, map[string]any{
-			"status":   "ok",
-			"revision": app.Revision(),
+			"status":         "ok",
+			"revision":       app.Revision(),
+			"schema_version": app.SchemaVersion(),
 		})
 	})
 	return withRecovery(mux)

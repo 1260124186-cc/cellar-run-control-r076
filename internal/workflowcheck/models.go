@@ -8,10 +8,11 @@ import (
 )
 
 type formulaView struct {
-	ID      string               `json:"id"`
-	State   domain.FormulaState  `json:"state"`
-	Version int64                `json:"version"`
-	Steps   []domain.FormulaStep `json:"steps"`
+	ID          string                     `json:"id"`
+	State       domain.FormulaState        `json:"state"`
+	Version     int64                      `json:"version"`
+	Ingredients []domain.FormulaIngredient `json:"ingredients"`
+	Steps       []domain.FormulaStep       `json:"steps"`
 }
 
 type vesselView struct {
@@ -67,6 +68,25 @@ func formulaStepPayload() map[string]any {
 				"label":         "Hold for primary activity",
 				"temperature_c": 19.0,
 				"hold_minutes":  240,
+			},
+		},
+	}
+}
+
+func formulaIngredientPayload() map[string]any {
+	return map[string]any{
+		"ingredients": []map[string]any{
+			{
+				"sequence": 1,
+				"name":     "Pale ale malt",
+				"amount":   42.5,
+				"unit":     "kg",
+			},
+			{
+				"sequence": 2,
+				"name":     "Cascade hops",
+				"amount":   0.4,
+				"unit":     "kg",
 			},
 		},
 	}

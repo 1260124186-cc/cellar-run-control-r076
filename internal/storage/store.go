@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,8 +11,6 @@ import (
 	"github.com/1260124186-cc/solo-0016-cellar-run-control/internal/domain"
 )
 
-const stateFileName = "state.json"
-
 type Store struct {
 	mu       sync.RWMutex
 	path     string
@@ -21,9 +18,16 @@ type Store struct {
 	now      func() time.Time
 }
 
+// Open prepares the data directory and loads the current snapshot. Any
+// pending schema migration runs first: an interrupted attempt is resumed,
+// and data with an unknown origin, a future schema version, or a failed
+// integrity check stops the open before any serving happens.
 func Open(dataDir string) (*Store, error) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create data directory: %w", err)
+	}
+	if _, err := Migrate(dataDir); err != nil {
+		return nil, err
 	}
 	store := &Store{
 		path:     filepath.Join(dataDir, stateFileName),
@@ -44,11 +48,15 @@ func (s *Store) load() error {
 	if err != nil {
 		return fmt.Errorf("read state: %w", err)
 	}
-	var loaded domain.Snapshot
-	if err := json.Unmarshal(raw, &loaded); err != nil {
-		return fmt.Errorf("decode state: %w", err)
+	state, err := decodeState(raw)
+	if err != nil {
+		return err
 	}
-	normalized, err := normalizeSnapshot(loaded)
+	if state.Version != CurrentSchemaVersion {
+		return fmt.Errorf("state schema version %d does not match the supported version %d after migration",
+			state.Version, CurrentSchemaVersion)
+	}
+	normalized, err := normalizeSnapshot(state.Snapshot)
 	if err != nil {
 		return err
 	}
@@ -161,7 +169,11 @@ func (s *Store) Update(expected *int64, mutate func(*domain.Snapshot) error) err
 	}
 	candidate.Revision = s.snapshot.Revision + 1
 	candidate.UpdatedAt = s.now()
-	if err := writeSnapshot(s.path, candidate); err != nil {
+	encoded, err := encodeState(candidate)
+	if err != nil {
+		return domain.NewError(domain.CodeStorage, err.Error())
+	}
+	if err := writeBytesAtomic(s.path, encoded); err != nil {
 		return domain.NewError(domain.CodeStorage, err.Error())
 	}
 	s.snapshot = candidate

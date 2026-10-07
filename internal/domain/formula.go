@@ -2,6 +2,7 @@ package domain
 
 import (
 	"math"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -14,33 +15,52 @@ const (
 	FormulaRetired  FormulaState = "retired"
 )
 
+// FormulaStep is one ordered process step. Schema version 2 adds the
+// optional template reference pair so a step can point at the versioned
+// process template it was derived from.
 type FormulaStep struct {
-	Sequence     int     `json:"sequence"`
-	Label        string  `json:"label"`
-	TemperatureC float64 `json:"temperature_c"`
-	HoldMinutes  int     `json:"hold_minutes"`
+	Sequence        int     `json:"sequence"`
+	Label           string  `json:"label"`
+	TemperatureC    float64 `json:"temperature_c"`
+	HoldMinutes     int     `json:"hold_minutes"`
+	TemplateRef     string  `json:"template_ref,omitempty"`
+	TemplateVersion int64   `json:"template_version,omitempty"`
+}
+
+// FormulaIngredient is one raw material line of a formula. Ingredients
+// were introduced by schema version 2; formulas migrated from version 1
+// carry an empty list until a planner fills it in.
+type FormulaIngredient struct {
+	Sequence int     `json:"sequence"`
+	Name     string  `json:"name"`
+	Amount   float64 `json:"amount"`
+	Unit     string  `json:"unit"`
 }
 
 type Formula struct {
-	ID                    string        `json:"id"`
-	Name                  string        `json:"name"`
-	Style                 string        `json:"style"`
-	TargetOriginalGravity float64       `json:"target_original_gravity"`
-	TargetFinalGravity    float64       `json:"target_final_gravity"`
-	MaxFermentationTempC  float64       `json:"max_fermentation_temp_c"`
-	MinimumDays           int           `json:"minimum_days"`
-	MaximumDays           int           `json:"maximum_days"`
-	Steps                 []FormulaStep `json:"steps"`
-	State                 FormulaState  `json:"state"`
-	Version               int64         `json:"version"`
-	CreatedAt             time.Time     `json:"created_at"`
-	UpdatedAt             time.Time     `json:"updated_at"`
-	ApprovedAt            *time.Time    `json:"approved_at,omitempty"`
-	RetiredAt             *time.Time    `json:"retired_at,omitempty"`
+	ID                    string              `json:"id"`
+	Name                  string              `json:"name"`
+	Style                 string              `json:"style"`
+	TargetOriginalGravity float64             `json:"target_original_gravity"`
+	TargetFinalGravity    float64             `json:"target_final_gravity"`
+	MaxFermentationTempC  float64             `json:"max_fermentation_temp_c"`
+	MinimumDays           int                 `json:"minimum_days"`
+	MaximumDays           int                 `json:"maximum_days"`
+	Ingredients           []FormulaIngredient `json:"ingredients"`
+	Steps                 []FormulaStep       `json:"steps"`
+	State                 FormulaState        `json:"state"`
+	Version               int64               `json:"version"`
+	CreatedAt             time.Time           `json:"created_at"`
+	UpdatedAt             time.Time           `json:"updated_at"`
+	ApprovedAt            *time.Time          `json:"approved_at,omitempty"`
+	RetiredAt             *time.Time          `json:"retired_at,omitempty"`
 }
 
 func (f Formula) Clone() Formula {
 	cloned := f
+	if f.Ingredients != nil {
+		cloned.Ingredients = append([]FormulaIngredient{}, f.Ingredients...)
+	}
 	cloned.Steps = append([]FormulaStep(nil), f.Steps...)
 	return cloned
 }
@@ -90,6 +110,9 @@ func (f Formula) Validate() error {
 	if len(f.Steps) > 24 {
 		return FieldError(CodeInvalidInput, "steps", "must contain at most 24 entries")
 	}
+	if err := ValidateFormulaIngredients(f.Ingredients); err != nil {
+		return err
+	}
 	if f.State == FormulaApproved || f.State == FormulaRetired {
 		if err := ValidateFormulaSteps(f.Steps, true); err != nil {
 			return err
@@ -97,6 +120,10 @@ func (f Formula) Validate() error {
 	}
 	return nil
 }
+
+// templateRefPattern keeps version references in a stable, portable shape
+// so migrated and planner-supplied references compare cleanly.
+var templateRefPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]{0,119}$`)
 
 func ValidateFormulaSteps(steps []FormulaStep, required bool) error {
 	if required && len(steps) == 0 {
@@ -126,6 +153,64 @@ func ValidateFormulaSteps(steps []FormulaStep, required bool) error {
 			return FieldError(CodeInvalidInput, "steps.hold_minutes",
 				"must be between 1 and 1440")
 		}
+		if err := validateTemplateReference(step); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateTemplateReference(step FormulaStep) error {
+	if step.TemplateRef == "" {
+		if step.TemplateVersion != 0 {
+			return FieldError(CodeInvalidInput, "steps.template_version",
+				"requires a template reference")
+		}
+		return nil
+	}
+	if !templateRefPattern.MatchString(step.TemplateRef) {
+		return FieldError(CodeInvalidInput, "steps.template_ref",
+			"must start with a lowercase letter or digit and contain only lowercase letters, digits, dots, underscores, slashes, or hyphens")
+	}
+	if step.TemplateVersion < 1 {
+		return FieldError(CodeInvalidInput, "steps.template_version",
+			"must be at least 1 when a template reference is present")
+	}
+	return nil
+}
+
+// ValidateFormulaIngredients checks the raw material list. The list may be
+// empty: formulas migrated from schema version 1 carry no ingredients until
+// a planner records them.
+func ValidateFormulaIngredients(ingredients []FormulaIngredient) error {
+	if len(ingredients) > 24 {
+		return FieldError(CodeInvalidInput, "ingredients",
+			"must contain at most 24 entries")
+	}
+	for index, ingredient := range ingredients {
+		expected := index + 1
+		if ingredient.Sequence != expected {
+			return FieldError(CodeInvalidInput, "ingredients",
+				"sequence values must be contiguous and begin at 1")
+		}
+		if strings.TrimSpace(ingredient.Name) == "" {
+			return FieldError(CodeInvalidInput, "ingredients.name", "is required")
+		}
+		if len([]rune(ingredient.Name)) > 120 {
+			return FieldError(CodeInvalidInput, "ingredients.name",
+				"must not exceed 120 characters")
+		}
+		if !(ingredient.Amount > 0) {
+			return FieldError(CodeInvalidInput, "ingredients.amount",
+				"must be greater than zero")
+		}
+		if strings.TrimSpace(ingredient.Unit) == "" {
+			return FieldError(CodeInvalidInput, "ingredients.unit", "is required")
+		}
+		if len([]rune(ingredient.Unit)) > 24 {
+			return FieldError(CodeInvalidInput, "ingredients.unit",
+				"must not exceed 24 characters")
+		}
 	}
 	return nil
 }
@@ -138,6 +223,19 @@ func (f *Formula) SetSteps(steps []FormulaStep) error {
 		return err
 	}
 	f.Steps = append([]FormulaStep(nil), steps...)
+	f.UpdatedAt = time.Now().UTC()
+	f.Version++
+	return nil
+}
+
+func (f *Formula) SetIngredients(ingredients []FormulaIngredient) error {
+	if f.State != FormulaDraft {
+		return NewError(CodeFormulaState, "only a draft formula can change ingredients")
+	}
+	if err := ValidateFormulaIngredients(ingredients); err != nil {
+		return err
+	}
+	f.Ingredients = append([]FormulaIngredient(nil), ingredients...)
 	f.UpdatedAt = time.Now().UTC()
 	f.Version++
 	return nil

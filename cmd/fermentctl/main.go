@@ -40,13 +40,18 @@ func run(arguments []string) error {
 			return usageError()
 		}
 		return workflowcheck.Run(arguments[1])
+	case "migrate":
+		if len(arguments) != 2 {
+			return usageError()
+		}
+		return migrate(arguments[1])
 	default:
 		return usageError()
 	}
 }
 
 func usageError() error {
-	return errors.New("usage: fermentctl serve | fermentctl check <workflow>")
+	return errors.New("usage: fermentctl serve | fermentctl check <workflow> | fermentctl migrate <status|run|rollback>")
 }
 
 func serve() error {
@@ -88,6 +93,80 @@ func serve() error {
 		return nil
 	}
 	return fmt.Errorf("serve HTTP: %w", err)
+}
+
+// migrate runs the operator-facing migration commands used inside a
+// downtime window: inspect the persisted version, execute pending
+// migrations without serving, or roll back an interrupted attempt.
+func migrate(action string) error {
+	cfg, err := config.FromEnv()
+	if err != nil {
+		return err
+	}
+	switch action {
+	case "status":
+		status, err := storage.InspectMigration(cfg.DataDir)
+		if err != nil {
+			return err
+		}
+		if !status.StateExists {
+			fmt.Printf("state: none (fresh directory, writes start at schema v%d)\n",
+				status.CurrentVersion)
+		} else {
+			fmt.Printf("state: schema v%d (binary supports v%d)\n",
+				status.StateVersion, status.CurrentVersion)
+		}
+		if status.JournalActive {
+			fmt.Printf("interrupted migration: v%d -> v%d (%s)\n",
+				status.JournalFrom, status.JournalTo, status.JournalStatus)
+		}
+		if status.LastReport != nil && status.LastReport.Performed {
+			fmt.Printf("last migration: v%d -> v%d finished at %s\n",
+				status.LastReport.FromVersion, status.LastReport.ToVersion,
+				status.LastReport.FinishedAt.Format("2006-01-02T15:04:05Z07:00"))
+			for _, step := range status.LastReport.Steps {
+				fmt.Printf("  step %s: schema v%d, formulas=%d vessels=%d runs=%d, validated=%t, checksum %s -> %s\n",
+					step.Name, step.Version, step.Formulas, step.Vessels, step.Runs,
+					step.Validated, step.PreChecksum, step.PostChecksum)
+			}
+		}
+		return nil
+	case "run":
+		if err := cfg.EnsureDataDir(); err != nil {
+			return err
+		}
+		report, err := storage.Migrate(cfg.DataDir)
+		if err != nil {
+			return err
+		}
+		if !report.Performed {
+			fmt.Printf("state is already at schema v%d; nothing to migrate\n", report.ToVersion)
+			return nil
+		}
+		fmt.Printf("migrated schema v%d -> v%d in %d step(s)\n",
+			report.FromVersion, report.ToVersion, len(report.Steps))
+		for _, step := range report.Steps {
+			fmt.Printf("  step %s: formulas=%d vessels=%d runs=%d, validated=%t, checksum %s -> %s\n",
+				step.Name, step.Formulas, step.Vessels, step.Runs,
+				step.Validated, step.PreChecksum, step.PostChecksum)
+		}
+		return nil
+	case "rollback":
+		report, err := storage.RollbackMigration(cfg.DataDir)
+		if err != nil {
+			return err
+		}
+		if report.RestoredBackup {
+			fmt.Printf("rolled back to the pre-migration backup at schema v%d\n",
+				report.RestoredVersion)
+		} else {
+			fmt.Printf("discarded the interrupted migration; state remains at schema v%d\n",
+				report.RestoredVersion)
+		}
+		return nil
+	default:
+		return usageError()
+	}
 }
 
 func init() {
